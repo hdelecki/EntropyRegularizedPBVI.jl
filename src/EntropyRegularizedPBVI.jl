@@ -32,6 +32,7 @@ include("qpbvi.jl")
 
 export
     EntropyRegularizedPolicy,
+    QSoftmaxPolicy,
     action
 
 include("policy.jl")

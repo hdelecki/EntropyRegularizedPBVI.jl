@@ -11,12 +11,13 @@ Options dictionary for Point-Based Value Iteration for POMDPs.
 struct QPBVISolver <: Solver
     max_iterations::Int64
     ϵ::Float64
+    λ::Float64
     optimizer_factory
     verbose::Bool
 end
 
-function QPBVISolver(;max_iterations::Int64=10, ϵ::Float64=0.01, optimizer_factory=GLPK.Optimizer, verbose::Bool=false)
-    return QPBVISolver(max_iterations, ϵ, optimizer_factory, verbose)
+function QPBVISolver(;max_iterations::Int64=10, ϵ::Float64=0.01, λ::Float64=1.0, optimizer_factory=GLPK.Optimizer, verbose::Bool=false)
+    return QPBVISolver(max_iterations, ϵ, λ, optimizer_factory, verbose)
 end
 """
     AlphaVec
@@ -51,29 +52,20 @@ function dominate(α::Array{Float64,1}, A::Set{Array{Float64,1}}, optimizer_fact
     @constraint(L, sum(x) == 1)
     @constraint(L, x[1:ns] .<= 1)
     @constraint(L, x[1:ns] .>= 0)
-    # dx = size(x)
-    # da = size(α)
-    # println("Size of x: $dx")
-    # println("Size of α: $da")
     for ap in Adiff
-        # dap = size(ap)
-        # println("Size of ap: $dap")
         @constraint(L, dot(x, α) >= δ + dot(x, ap))
     end
     JuMP.optimize!(L)
     sol_status = JuMP.termination_status(L)
     if sol_status == :Infeasible
         return :Perp
-        # println("Perp")
     else
         xval = JuMP.value.(x)
         dval = JuMP.value.(δ)
         if dval > 0
             return xval
-            # println("xval")
         else
             return :Perp
-            # println("Perp")
         end
     end
 end
@@ -106,11 +98,7 @@ function filtervec(F::Set{Array{Float64,1}}, optimizer_factory)
         end
     end
     while !isempty(F)
-        # println("F Before: $F")
         ϕ = pop!(F)
-        # println("F After: $F")
-        # println("ϕ: $ϕ")
-        # println("W: $W")
         x = dominate(ϕ, W, optimizer_factory)
         if x != :Perp
             push!(F, ϕ)
@@ -150,6 +138,20 @@ function belief_norm(pomdp, b, b′, terminals, not_terminals)
 end
 
 
+function ∇Ulse(solver, b, Γ)
+    λ = solver.λ
+    W = softmax([dot(α, b)/λ for α in Γ])
+    ∇U = hcat(Γ...)*W
+    return ∇U
+end
+
+
+function Ulse(solver, b, Γ)
+    λ = solver.λ
+    Qba = [_argmax(α -> α⋅b, Γi) for Γi in Γ]
+    return λ*logsumexp([dot(α, b)/λ for α in Qba])
+end
+
 
 function U(solver, b, A)
     return maximum([dot(α, b) for α in A])
@@ -186,12 +188,8 @@ function backup_belief(pomdp::POMDP, Γ, b, solver)
             # extract optimal alpha vector in each q-function
             Qba = [_argmax(α -> α ⋅ b′.b, Γi) for Γi in Γ]
             
-            # Then extract optimal alpha vector at resulting belief
-            Γao[obsindex(pomdp, o)] = _argmax(α -> α ⋅ b′.b, Qba)
-
-            #Amat = Γ[argmax([U(solver, b′.b, Γ[i]) for i=1:length(Γ)])]
-
-            #Γao[obsindex(pomdp, o)] = ∇U(solver, b′.b, Amat)    # Γ[argmax([U(solver, b′.b, A)]) for A in Γ] #∇U(solver, b′.b, Γ)[1]
+            # extract optimal alpha vector at resulting belief
+            Γao[obsindex(pomdp, o)] = ∇Ulse(solver, b′.b, Qba) #_argmax(α -> α ⋅ b′.b, Qba)
         end
 
         # construct new alpha vectors
@@ -200,12 +198,6 @@ function backup_belief(pomdp::POMDP, Γ, b, solver)
                                         for s in S]
     end
 
-    # find the optimal alpha vector
-    #idx = argmax(map(αa -> αa ⋅ b.b, Γa))
-    #alphavec = AlphaVec(Γa[idx], A[idx])
-    #avec, amax = ∇U(solver, b.b, Γa)
-    #alphavec = AlphaVec(avec, A[amax])
-    # Anew = hcat(Γa...)
     return [AlphaVec(Γa[actionindex(pomdp, a)], A[actionindex(pomdp, a)]) for a in A]
 end
 
@@ -215,21 +207,11 @@ function improve(pomdp, B, Γ, solver)
     A = ordered_actions(pomdp)
     while true
         Γold = Γ
-        # alphavecs = [backup_belief(pomdp, Γold, b, solver) for b in B]
-        # Γ = [alphavec.alpha for alphavec in alphavecs]
         new_alphas = [backup_belief(pomdp, Γold, b, solver) for b in B]
-        # Γ = []
-        # for (i,Γi) in enumerate(Γ)
-        #     alphas = [q[i].alpha for q in new_alphas]
-        #     append!(Γi, alphas)
-        # end
         Γ = [[alist[actionindex(pomdp, a)].alpha for alist in new_alphas] for a in A]
         for (i,Γi) in enumerate(Γ)
             append!(Γi, Γold[i])
         end
-        # @show Γ
-        # @show Γold
-        # prec = max([sum(abs.(dot(α1, b.b) .- dot(α2, b.b))) for (α1, α2, b) in zip(Γold, Γ, B)]...)
         prec = max([sum(abs.(U(solver, b.b, A1) .- U(solver, b.b, A2))) for (A1, A2, b) in zip(Γold, Γ, B)]...)
         if solver.verbose println("    Improving alphas, maximum gap between old and new α vector: $(prec)") end
         prec > solver.ϵ || break
@@ -332,12 +314,8 @@ function solve(solver::QPBVISolver, pomdp::POMDP)
     end
 
     if solver.verbose println("+----------------------------------------------------------+") end
-    #acts = [alphavec.action for alphavec in alphavecs]
-    #vecs = hcat(Γ...)
-    # acts = repeat(A, length(Γ))#[[A[idx] for idx=1:length(A)] for Amat in Γ]
-    # @show length(acts)
-    # @show size(vecs)
-    #return AlphaVectorPolicy(pomdp, vecs, acts), Γ
-    #return EntropyRegularizedPolicy(pomdp, unique(Γ), A, solver.λ)
-    return Γ
+
+    policy = QSoftmaxPolicy(pomdp, Γ, A, solver.λ)
+
+    return policy, B
 end
