@@ -14,6 +14,7 @@ POMDPs = "a93abf59-7444-517b-a68a-c42f96afdd7d"
 StatsFuns = "4c63d2b9-4356-54db-8cca-17b64c39e42c"
 
 [compat]
+JuMP = "1"
 FiniteHorizonPOMDPs = "0.4"
 StatsFuns = "1"
 GLPK = "1"
