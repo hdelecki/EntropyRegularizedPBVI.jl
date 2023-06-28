@@ -5,18 +5,21 @@ Options dictionary for Point-Based Value Iteration for POMDPs.
 
 # Fields
 - `max_iterations::Int64` the maximal number of iterations the solver runs. Default: 10
-- `ϵ::Float64` the maximal gap between alpha vector improve steps. Default = 0.01
+- `ϵ::Float64` the maximal gap between alpha vector improve steps. Default = 0.1
+- `λ::Float64` the maximal gap between alpha vector improve steps. Default = 1.0
+- `optimizer` optimizer from JuMP for pruning. Default: GLPK.Optimizer
 - `verbose::Bool` switch for solver text output. Default: false
 """
 struct ERPBVISolver <: Solver
     max_iterations::Int64
-    λ::Float64
     ϵ::Float64
+    λ::Float64
+    optimizer
     verbose::Bool
 end
 
-function ERPBVISolver(;max_iterations::Int64=10, λ=1.0, ϵ::Float64=0.01, verbose::Bool=false)
-    return ERPBVISolver(max_iterations, λ, ϵ, verbose)
+function ERPBVISolver(;max_iterations::Int64=10, ϵ::Float64=0.1, λ::Float64=1.0, optimizer=GLPK.Optimizer, verbose::Bool=false)
+    return ERPBVISolver(max_iterations, ϵ, λ, optimizer, verbose)
 end
 
 """
@@ -28,32 +31,97 @@ Pair of alpha vector and corresponding action.
 - `alpha` α vector
 - `action` action corresponding to α vector
 """
-# struct AlphaVec
-#     alpha::Vector{Float64}
-#     action::Any
-# end
-
-# ==(a::AlphaVec, b::AlphaVec) = (a.alpha,a.action) == (b.alpha, b.action)
-# Base.hash(a::AlphaVec, h::UInt) = hash(a.alpha, hash(a.action, h))
-
-"""
-    AlphaMatrix
-
-Pair of alpha vector and corresponding action.
-
-# Fields
-- `alpha` α vector
-- `action` action corresponding to α vector
-"""
-struct AlphaMatrix
-    alphas::Array{Float64}
+struct AlphaVec
+    alpha::Vector{Float64}
+    action::Any
 end
 
-==(a::AlphaMatrix, b::AlphaMatrix) = a.alphas == b.alphas
-
+==(a::AlphaVec, b::AlphaVec) = (a.alpha,a.action) == (b.alpha, b.action)
+Base.hash(a::AlphaVec, h::UInt) = hash(a.alpha, hash(a.action, h))
 
 function _argmax(f, X)
     return X[argmax(map(f, X))]
+end
+
+function dominate(α::Array{Float64,1}, A::Set{Array{Float64,1}}, optimizer)
+    ns = length(α)
+    αset = Set{Array{Float64,1}}()
+    push!(αset, α)
+    Adiff = setdiff(A,αset)
+    L = Model(optimizer)
+    @variable(L, x[1:ns])
+    @variable(L, δ)
+    @objective(L, Max, δ)
+    @constraint(L, sum(x) == 1)
+    @constraint(L, x[1:ns] .<= 1)
+    @constraint(L, x[1:ns] .>= 0)
+    for ap in Adiff
+        @constraint(L, dot(x, α) >= δ + dot(x, ap))
+    end
+    JuMP.optimize!(L)
+    sol_status = JuMP.termination_status(L)
+    if sol_status == :Infeasible
+        return :Perp
+    else
+        xval = JuMP.value.(x)
+        dval = JuMP.value.(δ)
+        if dval > 0
+            return xval
+        else
+            return :Perp
+        end
+    end
+end
+
+"""
+    filtervec(F)
+
+The set of vectors in `F` that contribute to the value function.
+"""
+function filtervec(F::Set{Array{Float64,1}}, optimizer)
+    ns = length(sum(F))
+    W = Set{Array{Float64,1}}()
+    for i = 1: ns
+        if !isempty(F)
+            # println("i: $i  ")
+            w = Array{Float64,1}()
+            fsmax = -Inf
+            for f in F
+                # println("f: $f")
+                if f[i] > fsmax
+                    fsmax = f[i]
+                    w = f
+                    end
+            end
+            wset = Set{Array{Float64,1}}()
+            push!(wset, w)
+            # println("w: $w")
+            push!(W,w)
+            setdiff!(F,wset)
+        end
+    end
+    while !isempty(F)
+        ϕ = pop!(F)
+        x = dominate(ϕ, W, optimizer)
+        if x != :Perp
+            push!(F, ϕ)
+            w = Array{Float64,1}()
+            fsmax = -Inf
+            for f in F
+                if dot(x, f) > fsmax
+                    fsmax = dot(x, f)
+                    w = f
+                    end
+            end
+            wset = Set{Array{Float64,1}}()
+            push!(wset, w)
+            push!(W,w)
+            setdiff!(F,wset)
+        end
+    end
+    temp = [Float64[]]
+    setdiff!(W,temp)
+    W
 end
 
 # adds probabilities of terminals in b to b′ and normalizes b′
@@ -72,32 +140,24 @@ function belief_norm(pomdp, b, b′, terminals, not_terminals)
     return b′
 end
 
-function entropy_regularized_value(Γ, b)
-    logsumexp([dot(α, b) for α in Γ])
-end
 
-function sample_belief(b; scale=1e-8)
-    #perturb belief vector
-    S = length(b)
-    b_perturb = b + scale.*rand(Distributions.Uniform(-1, 1), S)
-
-    # ensure that the result is in the belief simplex
-    clamp!(b, 0, 1)
-    b_perturb ./= sum(b_perturb)
-    return b_perturb
-end
-
-function ∇U(solver, b, A)
+function ∇Ulse(solver, b, Γ)
     λ = solver.λ
-    W = softmax([dot(α, b)/λ for α in eachcol(A)])
-    ∇U = A*W
+    W = softmax([dot(α, b)/λ for α in Γ])
+    ∇U = hcat(Γ...)*W
     return ∇U
 end
 
 
-function U(solver, b, A)
+function Ulse(solver, b, Γ)
     λ = solver.λ
-    return λ*logsumexp([dot(α, b)/λ for α in eachcol(A)])
+    Qba = [_argmax(α -> α⋅b, Γi) for Γi in Γ]
+    return λ*logsumexp([dot(α, b)/λ for α in Qba])
+end
+
+
+function U(solver, b, A)
+    return maximum([dot(α, b) for α in A])
 end
 
 # Backups belief with α vector maximizing dot product of itself with belief b
@@ -127,10 +187,12 @@ function backup_belief(pomdp::POMDP, Γ, b, solver)
             else
                 b′ = DiscreteBelief(pomdp, b.state_list, zeros(length(S)))
             end
-
+            
+            # extract optimal alpha vector in each q-function
+            Qba = [_argmax(α -> α ⋅ b′.b, Γi) for Γi in Γ]
+            
             # extract optimal alpha vector at resulting belief
-            Amat = Γ[argmax([U(solver, b′.b, Γ[i]) for i=1:length(Γ)])]
-            Γao[obsindex(pomdp, o)] = ∇U(solver, b′.b, Amat)    # Γ[argmax([U(solver, b′.b, A)]) for A in Γ] #∇U(solver, b′.b, Γ)[1]
+            Γao[obsindex(pomdp, o)] = ∇Ulse(solver, b′.b, Qba) #_argmax(α -> α ⋅ b′.b, Qba)
         end
 
         # construct new alpha vectors
@@ -139,30 +201,31 @@ function backup_belief(pomdp::POMDP, Γ, b, solver)
                                         for s in S]
     end
 
-    # find the optimal alpha vector
-    #idx = argmax(map(αa -> αa ⋅ b.b, Γa))
-    #alphavec = AlphaVec(Γa[idx], A[idx])
-    #avec, amax = ∇U(solver, b.b, Γa)
-    #alphavec = AlphaVec(avec, A[amax])
-    Anew = hcat(Γa...)
-    return Anew
+    return [AlphaVec(Γa[actionindex(pomdp, a)], A[actionindex(pomdp, a)]) for a in A]
 end
 
 # Iteratively improves α vectors until the gap between steps is lesser than ϵ
 function improve(pomdp, B, Γ, solver)
     alphavecs = nothing
+    A = ordered_actions(pomdp)
     while true
         Γold = Γ
-        # alphavecs = [backup_belief(pomdp, Γold, b, solver) for b in B]
-        # Γ = [alphavec.alpha for alphavec in alphavecs]
-        Γ = [backup_belief(pomdp, Γold, b, solver) for b in B]
-        # prec = max([sum(abs.(dot(α1, b.b) .- dot(α2, b.b))) for (α1, α2, b) in zip(Γold, Γ, B)]...)
+        new_alphas = [backup_belief(pomdp, Γold, b, solver) for b in B]
+        Γ = [[alist[actionindex(pomdp, a)].alpha for alist in new_alphas] for a in A]
+        for (i,Γi) in enumerate(Γ)
+            append!(Γi, Γold[i])
+        end
         prec = max([sum(abs.(U(solver, b.b, A1) .- U(solver, b.b, A2))) for (A1, A2, b) in zip(Γold, Γ, B)]...)
         if solver.verbose println("    Improving alphas, maximum gap between old and new α vector: $(prec)") end
         prec > solver.ϵ || break
     end
 
     return Γ#, alphavecs
+end
+
+function prune(solver, Γ)
+    Γpruned = [[filtervec(Set(Γi), solver.optimizer)...] for Γi in Γ]
+    return Γpruned
 end
 
 # Returns all possible, not yet visited successors of current belief b
@@ -229,7 +292,7 @@ function solve(solver::ERPBVISolver, pomdp::POMDP)
 
     # best action worst state lower bound
     α_init = 1 / (1 - γ) * maximum(minimum(r(s, a) for s in S) for a in A)
-    Γ = [hcat([fill(α_init, length(S)) for a in A]...)]
+    Γ = [[fill(α_init, length(S))] for a in A]
 
     #init belief, if given distribution, convert to vector
     init = initialize_belief(DiscreteUpdater(pomdp), initialstate(pomdp))
@@ -244,6 +307,7 @@ function solve(solver::ERPBVISolver, pomdp::POMDP)
     alphavecs = nothing
     for i in 1:solver.max_iterations
         Γ = improve(pomdp, B, Γ, solver)
+        Γ = prune(solver, Γ)
         B, Bs, early_term = expand(pomdp, B, Bs)
         if solver.verbose println("Iteration $(i) executed, belief set contains $(length(Bs)) belief vectors.") end
         if early_term
@@ -253,11 +317,8 @@ function solve(solver::ERPBVISolver, pomdp::POMDP)
     end
 
     if solver.verbose println("+----------------------------------------------------------+") end
-    #acts = [alphavec.action for alphavec in alphavecs]
-    vecs = hcat(Γ...)
-    acts = repeat(A, length(Γ))#[[A[idx] for idx=1:length(A)] for Amat in Γ]
-    @show length(acts)
-    @show size(vecs)
-    #return AlphaVectorPolicy(pomdp, vecs, acts), Γ
-    return EntropyRegularizedPolicy(pomdp, unique(Γ), A, solver.λ)
+
+    policy = EntropyRegularizedPolicy(pomdp, Γ, A, solver.λ)
+
+    return policy
 end

@@ -12,27 +12,15 @@ import Base: ==, hash, convert
 import FiniteHorizonPOMDPs: InStageDistribution, FixedHorizonPOMDPWrapper
 import StatsFuns: logsumexp, softmax
 
-# Write your package code here.
-
-export say_hello
-
-say_hello() = println("Hello!")
-
-# export
-#     ERPBVISolver,
-#     solve
-
-# include("erpbvi.jl")
 
 export
-    QPBVISolver,
+    ERPBVISolver,
     solve
 
-include("qpbvi.jl")
+include("erpbvi.jl")
 
 export
     EntropyRegularizedPolicy,
-    QSoftmaxPolicy,
     action
 
 include("policy.jl")
