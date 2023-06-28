@@ -317,5 +317,5 @@ function solve(solver::QPBVISolver, pomdp::POMDP)
 
     policy = QSoftmaxPolicy(pomdp, Γ, A, solver.λ)
 
-    return policy, B
+    return policy
 end
