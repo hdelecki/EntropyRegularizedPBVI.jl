@@ -43,9 +43,9 @@ function _argmax(f, X)
     return X[argmax(map(f, X))]
 end
 
-function dominate(α::Array{Float64,1}, A::Set{Array{Float64,1}}, optimizer)
+function dominate(α::Vector{Float64}, A::Set{Vector{Float64}}, optimizer)
     ns = length(α)
-    αset = Set{Array{Float64,1}}()
+    αset = Set{Vector{Float64}}()
     push!(αset, α)
     Adiff = setdiff(A,αset)
     L = Model(optimizer)
@@ -78,13 +78,13 @@ end
 
 The set of vectors in `F` that contribute to the value function.
 """
-function filtervec(F::Set{Array{Float64,1}}, optimizer)
+function filtervec(F::Set{Vector{Float64}}, optimizer)
     ns = length(sum(F))
-    W = Set{Array{Float64,1}}()
+    W = Set{Vector{Float64}}()
     for i = 1: ns
         if !isempty(F)
             # println("i: $i  ")
-            w = Array{Float64,1}()
+            w = Vector{Float64}()
             fsmax = -Inf
             for f in F
                 # println("f: $f")
@@ -93,7 +93,7 @@ function filtervec(F::Set{Array{Float64,1}}, optimizer)
                     w = f
                     end
             end
-            wset = Set{Array{Float64,1}}()
+            wset = Set{Vector{Float64}}()
             push!(wset, w)
             # println("w: $w")
             push!(W,w)
@@ -105,7 +105,7 @@ function filtervec(F::Set{Array{Float64,1}}, optimizer)
         x = dominate(ϕ, W, optimizer)
         if x != :Perp
             push!(F, ϕ)
-            w = Array{Float64,1}()
+            w = Vector{Float64}()
             fsmax = -Inf
             for f in F
                 if dot(x, f) > fsmax
@@ -113,7 +113,7 @@ function filtervec(F::Set{Array{Float64,1}}, optimizer)
                     w = f
                     end
             end
-            wset = Set{Array{Float64,1}}()
+            wset = Set{Vector{Float64}}()
             push!(wset, w)
             push!(W,w)
             setdiff!(F,wset)
