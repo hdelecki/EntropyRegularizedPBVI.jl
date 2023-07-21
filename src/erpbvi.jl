@@ -318,7 +318,7 @@ function solve(solver::ERPBVISolver, pomdp::POMDP)
 
     if solver.verbose println("+----------------------------------------------------------+") end
 
-    policy = EntropyRegularizedPolicy(pomdp, Γ, A, solver.λ)
+    policy = EntropyRegularizedPolicy(pomdp, Γ, A, solver.λ, true)
 
     return policy
 end
