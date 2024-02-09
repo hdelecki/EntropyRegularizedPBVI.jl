@@ -1,4 +1,4 @@
-# Entropy Regularized Point-based Value Iteration
+# Entropy-regularized Point-based Value Iteration
 
 [![Build Status](https://github.com/hdelecki/EntropyRegularizedPBVI.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/hdelecki/EntropyRegularizedPBVI.jl/actions/workflows/CI.yml?query=branch%3Amain)
 
